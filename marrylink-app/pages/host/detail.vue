@@ -101,7 +101,7 @@
     <view class="bottom-bar" v-if="!isHost">
       <view class="contact-btn" @click="handleContact">
         <text class="btn-icon">💬</text>
-        <text class="btn-text">咨询</text>
+        <text class="btn-text">沟通</text>
       </view>
       <button class="book-btn" @click="handleBook">立即预约</button>
     </view>
@@ -111,6 +111,7 @@
 <script>
 import { mapState } from 'vuex'
 import { getHostDetail, getTagList, getHostReviews } from '@/api/host'
+import { createConversation } from '@/api/chat'
 import { BASE_URL } from '@/utils/request'
 
 export default {
@@ -233,13 +234,46 @@ export default {
       return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
     },
     
-    // 咨询
-    handleContact() {
-      uni.showModal({
-        title: '联系主持人',
-        content: `电话：${this.hostInfo.phone || '138****8888'}\n微信：${this.hostInfo.wechat || 'marrylink'}`,
-        showCancel: false
-      })
+    // 沟通 - 跳转到实时对话
+    async handleContact() {
+      const token = uni.getStorageSync('token')
+      if (!token) {
+        uni.showModal({
+          title: '提示',
+          content: '请先登录',
+          success: (res) => {
+            if (res.confirm) {
+              uni.navigateTo({
+                url: '/pages/login/index'
+              })
+            }
+          }
+        })
+        return
+      }
+
+      uni.showLoading({ title: '正在连接...' })
+      try {
+        const res = await createConversation({
+          targetId: Number(this.hostId),
+          targetType: 'HOST'
+        })
+        uni.hideLoading()
+        if (res.code === 200 || res.code === '00000') {
+          const conversation = res.data
+          const targetName = this.hostInfo.name || '主持人'
+          const targetAvatar = this.hostAvatarUrl || ''
+          uni.navigateTo({
+            url: `/pages/chat/conversation?conversationId=${conversation.id}&targetName=${encodeURIComponent(targetName)}&targetAvatar=${encodeURIComponent(targetAvatar)}`
+          })
+        } else {
+          uni.showToast({ title: res.msg || '创建会话失败', icon: 'none' })
+        }
+      } catch (e) {
+        uni.hideLoading()
+        console.error('创建会话失败:', e)
+        uni.showToast({ title: '网络错误，请稍后重试', icon: 'none' })
+      }
     },
     
     // 预约
