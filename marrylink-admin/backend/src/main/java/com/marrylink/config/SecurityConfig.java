@@ -88,6 +88,7 @@ public class SecurityConfig {
                 // 公开接口
                 .antMatchers("/auth/**").permitAll()
                 .antMatchers("/public/**").permitAll()
+                .antMatchers("/ws/**").permitAll()
                 .antMatchers("/uploads/**").permitAll()
                 // 主持人公开接口（列表和详情，供App端未登录用户访问）
                 .antMatchers(org.springframework.http.HttpMethod.GET, "/host/page").permitAll()

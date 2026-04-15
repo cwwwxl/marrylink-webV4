@@ -131,6 +131,8 @@ import { TOKEN_KEY } from "@/enums/CacheEnum";
 import {
   getConversations,
   getMessages,
+  sendChatMessage,
+  markConversationRead,
   uploadChatImage,
   getUnreadCount,
 } from "@/api/chat";
@@ -159,7 +161,7 @@ interface Message {
 
 // ─── Store & User ────────────────────────────────────────────────────────────
 const userStore = useUserStore();
-const currentUserId = computed(() => userStore.user.accountId ?? 0);
+const currentUserId = computed(() => userStore.user.refId ?? userStore.user.accountId ?? 0);
 
 // ─── State ───────────────────────────────────────────────────────────────────
 const searchKeyword = ref("");
@@ -235,7 +237,16 @@ async function loadConversations() {
   try {
     const res: any = await getConversations();
     const list = Array.isArray(res) ? res : res?.data ?? res?.list ?? [];
-    conversations.value = list;
+    // 将后端返回的数据映射为前端 Conversation 格式
+    conversations.value = list.map((item: any) => ({
+      id: String(item.id),
+      name: item.targetName || item.name || "未知",
+      avatar: item.targetAvatar || item.avatar || "",
+      lastMessage: item.lastMessage || "",
+      lastMessageTime: item.lastMessageTime || "",
+      unreadCount: item.unreadCount || 0,
+      online: false,
+    }));
   } catch (e) {
     console.error("Failed to load conversations", e);
   }
@@ -244,11 +255,23 @@ async function loadConversations() {
 async function loadMessages(conversationId: string, page = 1) {
   try {
     loadingMore.value = true;
-    const res: any = await getMessages(conversationId, { page, size: 30 });
-    const list: Message[] = Array.isArray(res)
-      ? res
-      : res?.data ?? res?.list ?? res?.records ?? [];
-    hasMore.value = list.length >= 30;
+    const res: any = await getMessages(conversationId, { current: page, size: 30 });
+    // Spring Boot PageResult: { records: [], total, current, size }
+    const rawList = res?.records ?? res?.data?.records ?? res?.data ?? [];
+    // 映射为前端 Message 格式
+    const list: Message[] = rawList.map((item: any) => ({
+      id: String(item.id),
+      conversationId: String(item.conversationId),
+      senderId: item.senderId,
+      senderName: item.senderName || "",
+      senderAvatar: "",
+      content: item.content,
+      type: item.msgType || "text",
+      createdAt: item.createTime || "",
+    }));
+    // 消息按时间倒序返回，翻转为正序
+    list.reverse();
+    hasMore.value = rawList.length >= 30;
     if (page === 1) {
       messages.value = list;
       await nextTick();
@@ -274,7 +297,7 @@ async function loadMessages(conversationId: string, page = 1) {
 async function loadUnreadCount() {
   try {
     const res: any = await getUnreadCount();
-    totalUnread.value = typeof res === "number" ? res : res?.count ?? res?.data ?? 0;
+    totalUnread.value = res?.totalUnread ?? res?.count ?? 0;
   } catch {
     // ignore
   }
@@ -289,7 +312,8 @@ function selectConversation(conv: Conversation) {
   messages.value = [];
   loadMessages(conv.id, 1);
 
-  // Mark read via WebSocket
+  // 标记已读 (REST API + WebSocket)
+  markConversationRead(conv.id).catch(() => {});
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "read", conversationId: conv.id }));
   }
@@ -321,41 +345,54 @@ function handleScroll({ scrollTop }: { scrollTop: number }) {
 }
 
 // ─── Send Message ────────────────────────────────────────────────────────────
-function sendMessage() {
+async function sendMessage() {
   const text = inputMessage.value.trim();
   if (!text || !currentConversation.value) return;
-  sendWsMessage(text, "text");
   inputMessage.value = "";
+  await doSendMessage(text, "text");
 }
 
-function sendWsMessage(content: string, type: "text" | "image") {
-  if (!ws || ws.readyState !== WebSocket.OPEN || !currentConversation.value) {
-    ElMessage.warning("连接已断开，正在重连...");
-    return;
-  }
+async function doSendMessage(content: string, msgType: "text" | "image") {
+  if (!currentConversation.value) return;
 
-  const payload = {
-    type: "message",
-    conversationId: currentConversation.value.id,
-    content,
-    messageType: type,
-  };
-  ws.send(JSON.stringify(payload));
-
-  // Optimistic add
-  const msg: Message = {
+  // 乐观添加消息到 UI
+  const tempMsg: Message = {
     id: `temp-${Date.now()}`,
     conversationId: currentConversation.value.id,
     senderId: currentUserId.value,
     senderName: userStore.user.realName || "我",
     senderAvatar: userStore.user.avatar || "",
     content,
-    type,
+    type: msgType,
     createdAt: new Date().toISOString(),
   };
-  messages.value.push(msg);
-  updateConversationPreview(msg);
+  messages.value.push(tempMsg);
+  updateConversationPreview(tempMsg);
   scrollToBottom();
+
+  try {
+    // 通过 REST API 发送消息 (后端会通过 WebSocket 推送给对方)
+    const res: any = await sendChatMessage({
+      conversationId: Number(currentConversation.value.id),
+      content,
+      msgType,
+    });
+    // 用服务端返回的真实消息替换临时消息
+    if (res?.id) {
+      const idx = messages.value.findIndex((m) => m.id === tempMsg.id);
+      if (idx !== -1) {
+        messages.value[idx] = {
+          ...tempMsg,
+          id: String(res.id),
+          createdAt: res.createTime || tempMsg.createdAt,
+        };
+      }
+    }
+  } catch (e) {
+    ElMessage.error("发送失败，请重试");
+    const idx = messages.value.findIndex((m) => m.id === tempMsg.id);
+    if (idx !== -1) messages.value.splice(idx, 1);
+  }
 }
 
 function updateConversationPreview(msg: Message) {
@@ -414,7 +451,7 @@ async function handleImageUpload({ file }: { file: File }) {
     const res: any = await uploadChatImage(fd);
     const url = res?.url ?? res?.data?.url ?? res;
     if (typeof url === "string" && url) {
-      sendWsMessage(url, "image");
+      await doSendMessage(url, "image");
     } else {
       ElMessage.error("上传失败");
     }
@@ -429,7 +466,7 @@ function connectWebSocket() {
   const token = raw.startsWith("Bearer ") ? raw.slice(7) : raw;
   if (!token) return;
 
-  const wsUrl = `ws://localhost:3001/ws?token=${encodeURIComponent(token)}`;
+  const wsUrl = `ws://${window.location.hostname}:8080/api/v1/ws/chat?token=${encodeURIComponent(token)}`;
   ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
@@ -458,16 +495,17 @@ function connectWebSocket() {
 
 function handleWsMessage(data: any) {
   switch (data.type) {
-    case "message": {
+    case "new_message": {
+      const d = data.data || data;
       const msg: Message = {
-        id: data.id || `ws-${Date.now()}`,
-        conversationId: data.conversationId,
-        senderId: data.senderId,
-        senderName: data.senderName || "",
-        senderAvatar: data.senderAvatar || "",
-        content: data.content,
-        type: data.messageType || "text",
-        createdAt: data.createdAt || new Date().toISOString(),
+        id: String(d.id || `ws-${Date.now()}`),
+        conversationId: String(d.conversationId),
+        senderId: d.senderId,
+        senderName: d.senderName || "",
+        senderAvatar: "",
+        content: d.content,
+        type: d.msgType || "text",
+        createdAt: d.createTime || new Date().toISOString(),
       };
 
       // If it belongs to the current open conversation
@@ -506,6 +544,7 @@ function handleWsMessage(data: any) {
       }
       break;
     }
+    case "messages_read":
     case "read": {
       // Could update message read status here
       break;

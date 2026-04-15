@@ -98,7 +98,7 @@
 </template>
 
 <script>
-import { getMessages } from '@/api/chat'
+import { getMessages, sendChatMessage, markConversationRead } from '@/api/chat'
 import { CHAT_WS_URL, CHAT_BASE_URL } from '@/utils/chat-request'
 import { mapState } from 'vuex'
 
@@ -165,15 +165,28 @@ export default {
     async loadMessages() {
       try {
         const res = await getMessages(this.conversationId, {
-          page: this.page,
-          pageSize: this.pageSize
+          current: this.page,
+          size: this.pageSize
         })
         if (res.code === 200 || res.code === '00000') {
-          const list = res.data || []
-          if (list.length < this.pageSize) {
+          // Spring Boot PageResult: { records: [], total, current, size }
+          const pageData = res.data || {}
+          const rawList = pageData.records || pageData || []
+          if (rawList.length < this.pageSize) {
             this.noMoreMessages = true
           }
-          this.messages = list.reverse()
+          // 映射消息格式
+          const myRefId = this.userInfo ? (this.userInfo.refId || this.userInfo.id) : null
+          const myType = this.userInfo ? this.userInfo.userType : ''
+          this.messages = rawList.map(item => ({
+            id: item.id,
+            type: item.msgType || 'text',
+            content: item.content,
+            isSelf: item.senderId == myRefId || item.senderType === myType,
+            createdAt: item.createTime || ''
+          })).reverse()
+          // 标记已读
+          markConversationRead(this.conversationId).catch(() => {})
           this.$nextTick(() => {
             this.scrollToBottom()
           })
@@ -193,15 +206,25 @@ export default {
       this.page++
       try {
         const res = await getMessages(this.conversationId, {
-          page: this.page,
-          pageSize: this.pageSize
+          current: this.page,
+          size: this.pageSize
         })
         if (res.code === 200 || res.code === '00000') {
-          const list = res.data || []
-          if (list.length < this.pageSize) {
+          const pageData = res.data || {}
+          const rawList = pageData.records || pageData || []
+          if (rawList.length < this.pageSize) {
             this.noMoreMessages = true
           }
-          this.messages = [...list.reverse(), ...this.messages]
+          const myRefId = this.userInfo ? (this.userInfo.refId || this.userInfo.id) : null
+          const myType = this.userInfo ? this.userInfo.userType : ''
+          const mapped = rawList.map(item => ({
+            id: item.id,
+            type: item.msgType || 'text',
+            content: item.content,
+            isSelf: item.senderId == myRefId || item.senderType === myType,
+            createdAt: item.createTime || ''
+          })).reverse()
+          this.messages = [...mapped, ...this.messages]
         }
       } catch (e) {
         console.error('加载更多消息失败:', e)
@@ -211,24 +234,14 @@ export default {
     },
 
     // 发送文本消息
-    sendTextMessage() {
+    async sendTextMessage() {
       const text = this.inputText.trim()
       if (!text) return
 
-      const msg = {
-        type: 'text',
-        content: text,
-        conversationId: this.conversationId
-      }
-
-      this.sendSocketMsg({
-        action: 'send_message',
-        data: msg
-      })
-
       // 本地先添加消息
+      const localId = 'local_' + Date.now()
       this.messages.push({
-        id: 'local_' + Date.now(),
+        id: localId,
         type: 'text',
         content: text,
         isSelf: true,
@@ -240,6 +253,26 @@ export default {
       this.$nextTick(() => {
         this.scrollToBottom()
       })
+
+      try {
+        // 通过 REST API 发送消息
+        const res = await sendChatMessage({
+          conversationId: Number(this.conversationId),
+          content: text,
+          msgType: 'text'
+        })
+        if (res.code === 200 || res.code === '00000') {
+          // 更新本地消息 ID
+          const localMsg = this.messages.find(m => m.id === localId)
+          if (localMsg && res.data) {
+            localMsg.id = res.data.id
+            localMsg.status = 'sent'
+          }
+        }
+      } catch (e) {
+        console.error('发送消息失败:', e)
+        uni.showToast({ title: '发送失败', icon: 'none' })
+      }
     },
 
     // 选择图片
@@ -285,21 +318,19 @@ export default {
             const data = JSON.parse(uploadRes.data)
             if (data.code === 200 || data.code === '00000') {
               const imageUrl = data.data.url || data.data
-              // 通过 WebSocket 发送图片消息
-              this.sendSocketMsg({
-                action: 'send_message',
-                data: {
-                  type: 'image',
-                  content: imageUrl,
-                  conversationId: this.conversationId
+              // 通过 REST API 发送图片消息
+              sendChatMessage({
+                conversationId: Number(this.conversationId),
+                content: imageUrl,
+                msgType: 'image'
+              }).then(res => {
+                const localMsg = this.messages.find(m => m.id === localId)
+                if (localMsg) {
+                  localMsg.content = imageUrl
+                  localMsg.status = 'sent'
+                  if (res.data) localMsg.id = res.data.id
                 }
-              })
-              // 更新本地消息 URL
-              const localMsg = this.messages.find(m => m.id === localId)
-              if (localMsg) {
-                localMsg.content = imageUrl
-                localMsg.status = 'sent'
-              }
+              }).catch(() => {})
             }
           } catch (e) {
             console.error('解析上传结果失败:', e)
@@ -413,21 +444,27 @@ export default {
 
     // 处理收到的消息
     handleSocketMessage(data) {
-      if (data.type === 'message' || data.type === 'new_message') {
-        const msg = data.data || data.message || data
+      if (data.type === 'new_message') {
+        const msg = data.data || data
         // 确保消息属于当前会话
-        if (msg.conversationId && msg.conversationId !== this.conversationId) return
+        if (msg.conversationId && String(msg.conversationId) !== String(this.conversationId)) return
+        // 忽略自己发送的消息（已经通过乐观更新添加）
+        const myRefId = this.userInfo ? (this.userInfo.refId || this.userInfo.id) : null
+        const myType = this.userInfo ? this.userInfo.userType : ''
+        if (msg.senderId == myRefId || msg.senderType === myType) return
 
         this.messages.push({
           id: msg.id || 'remote_' + Date.now(),
-          type: msg.type || msg.messageType || 'text',
+          type: msg.msgType || 'text',
           content: msg.content,
           isSelf: false,
-          createdAt: msg.createdAt || new Date().toISOString()
+          createdAt: msg.createTime || new Date().toISOString()
         })
         this.$nextTick(() => {
           this.scrollToBottom()
         })
+        // 标记已读
+        markConversationRead(this.conversationId).catch(() => {})
       }
     },
 

@@ -26,5 +26,9 @@ public class CorsConfig implements WebMvcConfigurer {
         String uploadPath = System.getProperty("user.dir") + File.separator + "marrylink-admin" + File.separator + "uploads" + File.separator;
         registry.addResourceHandler("/uploads/**")
                 .addResourceLocations("file:" + uploadPath);
+
+        String chatUploadPath = System.getProperty("user.dir") + File.separator + "marrylink-admin" + File.separator + "uploads" + File.separator + "chat" + File.separator;
+        registry.addResourceHandler("/uploads/chat/**")
+                .addResourceLocations("file:" + chatUploadPath);
     }
 }
