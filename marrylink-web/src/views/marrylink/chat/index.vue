@@ -163,6 +163,14 @@ interface Message {
 const userStore = useUserStore();
 const currentUserId = computed(() => userStore.user.refId ?? userStore.user.accountId ?? 0);
 
+// 处理图片URL，将相对路径转为可访问的完整路径
+const BASE_API = import.meta.env.VITE_APP_BASE_API || "";
+function resolveImageUrl(content: string, msgType?: string): string {
+  if (msgType !== "image" || !content) return content;
+  if (content.startsWith("http://") || content.startsWith("https://") || content.startsWith("blob:")) return content;
+  return BASE_API + content;
+}
+
 // ─── State ───────────────────────────────────────────────────────────────────
 const searchKeyword = ref("");
 const conversations = ref<Conversation[]>([]);
@@ -265,7 +273,7 @@ async function loadMessages(conversationId: string, page = 1) {
       senderId: item.senderId,
       senderName: item.senderName || "",
       senderAvatar: "",
-      content: item.content,
+      content: resolveImageUrl(item.content, item.msgType),
       type: item.msgType || "text",
       createdAt: item.createTime || "",
     }));
@@ -449,9 +457,10 @@ async function handleImageUpload({ file }: { file: File }) {
     const fd = new FormData();
     fd.append("file", file);
     const res: any = await uploadChatImage(fd);
-    const url = res?.url ?? res?.data?.url ?? res;
-    if (typeof url === "string" && url) {
-      await doSendMessage(url, "image");
+    const rawUrl = res?.url ?? res?.data?.url ?? res;
+    if (typeof rawUrl === "string" && rawUrl) {
+      const fullUrl = resolveImageUrl(rawUrl, "image");
+      await doSendMessage(fullUrl, "image");
     } else {
       ElMessage.error("上传失败");
     }
@@ -503,7 +512,7 @@ function handleWsMessage(data: any) {
         senderId: d.senderId,
         senderName: d.senderName || "",
         senderAvatar: "",
-        content: d.content,
+        content: resolveImageUrl(d.content, d.msgType),
         type: d.msgType || "text",
         createdAt: d.createTime || new Date().toISOString(),
       };

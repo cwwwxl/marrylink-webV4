@@ -100,6 +100,7 @@
 <script>
 import { getMessages, sendChatMessage, markConversationRead } from '@/api/chat'
 import { CHAT_WS_URL, CHAT_BASE_URL } from '@/utils/chat-request'
+import { BASE_URL } from '@/utils/request'
 import { mapState } from 'vuex'
 
 export default {
@@ -161,6 +162,17 @@ export default {
   },
 
   methods: {
+    // 处理图片URL，将相对路径转为完整URL
+    resolveImageUrl(content, msgType) {
+      if (msgType !== 'image' || !content) return content
+      // 已经是完整URL则不处理
+      if (content.startsWith('http://') || content.startsWith('https://')) return content
+      // 本地临时文件不处理
+      if (content.startsWith('blob:') || content.startsWith('_doc/') || content.startsWith('file://')) return content
+      // 相对路径拼接后端地址
+      return BASE_URL + content
+    },
+
     // 加载消息
     async loadMessages() {
       try {
@@ -181,7 +193,7 @@ export default {
           this.messages = rawList.map(item => ({
             id: item.id,
             type: item.msgType || 'text',
-            content: item.content,
+            content: this.resolveImageUrl(item.content, item.msgType),
             isSelf: item.senderId == myRefId || item.senderType === myType,
             createdAt: item.createTime || ''
           })).reverse()
@@ -220,7 +232,7 @@ export default {
           const mapped = rawList.map(item => ({
             id: item.id,
             type: item.msgType || 'text',
-            content: item.content,
+            content: this.resolveImageUrl(item.content, item.msgType),
             isSelf: item.senderId == myRefId || item.senderType === myType,
             createdAt: item.createTime || ''
           })).reverse()
@@ -317,7 +329,8 @@ export default {
           try {
             const data = JSON.parse(uploadRes.data)
             if (data.code === 200 || data.code === '00000') {
-              const imageUrl = data.data.url || data.data
+              const rawUrl = data.data.url || data.data
+              const imageUrl = rawUrl.startsWith('http') ? rawUrl : BASE_URL + rawUrl
               // 通过 REST API 发送图片消息
               sendChatMessage({
                 conversationId: Number(this.conversationId),
@@ -456,7 +469,7 @@ export default {
         this.messages.push({
           id: msg.id || 'remote_' + Date.now(),
           type: msg.msgType || 'text',
-          content: msg.content,
+          content: this.resolveImageUrl(msg.content, msg.msgType),
           isSelf: false,
           createdAt: msg.createTime || new Date().toISOString()
         })
