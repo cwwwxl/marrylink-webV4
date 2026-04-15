@@ -16,6 +16,14 @@ export const marrylinkRoutes: RouteRecordRaw[] = [
     },
     children: [
       {
+        path: 'chat',
+        name: 'ChatManage',
+        component: () => import('@/views/marrylink/chat/index.vue'),
+        meta: {
+          title: '实时对话',
+        }
+      },
+      {
         path: 'host',
         name: 'HostManage',
         component: () => import('@/views/marrylink/host/index.vue'),
